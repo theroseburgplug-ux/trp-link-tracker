@@ -55,6 +55,12 @@ if (path === "/debug/list-all") {
     return handleListLinks(request, env, corsHeaders);
   }
 
+  // Recent clicks for a link
+  if (path.startsWith("/api/recent-clicks/") && request.method === "GET") {
+    const slug = path.replace("/api/recent-clicks/", "");
+    return handleRecentClicks(slug, request, env, corsHeaders);
+  }
+
   // Basic stats JSON (auth required)
   if (path.startsWith("/api/stats/") && request.method === "GET") {
     const slug = path.replace("/api/stats/", "");
@@ -120,6 +126,11 @@ async function handleCreateLink(request, env, cors, url) {
 
     destination = destination.trim();
 
+    // Validate URL
+    if (!isValidUrl(destination)) {
+      return json({ error: "Invalid destination URL" }, 400, cors);
+    }
+
     if (!slug || !slug.trim()) {
       slug = generateSlug();
     }
@@ -145,6 +156,9 @@ async function handleCreateLink(request, env, cors, url) {
     };
 
     await env.LINKS.put(slug, JSON.stringify(record));
+
+    // Add to owner index
+    await indexOwnerKey(env, owner_key, slug);
 
     return json(
       {
@@ -176,20 +190,23 @@ async function handleListLinks(request, env, cors) {
 
   if (!key) return json({ error: "Missing ?key=" }, 400, cors);
 
-  const list = await env.LINKS.list();
-  const links = [];
-
-  for (const entry of list.keys) {
-    // skip click & aggregate entries
-    if (entry.name.startsWith("click:")) continue;
-    if (entry.name.startsWith("agg:")) continue;
-
-    const obj = await env.LINKS.get(entry.name);
-    if (!obj) continue;
-
-    const parsed = JSON.parse(obj);
-    if (parsed.owner_key === key) links.push(parsed);
+  // Use owner index for fast lookup
+  const indexKey = `owner_index:${key}`;
+  const indexData = await env.LINKS.get(indexKey);
+  
+  if (!indexData) {
+    return json({ links: [] }, 200, cors);
   }
+
+  const slugs = JSON.parse(indexData);
+  
+  // Fetch all links concurrently for better performance
+  const linkPromises = slugs.map(slug => env.LINKS.get(slug));
+  const linkResults = await Promise.all(linkPromises);
+  
+  const links = linkResults
+    .filter(obj => obj !== null)
+    .map(obj => JSON.parse(obj));
 
   links.sort((a, b) => b.created - a.created);
   return json({ links }, 200, cors);
@@ -262,6 +279,54 @@ async function handleDashboard(slug, request, env, cors) {
 }
 
 // --------------------------------------------------------
+// RECENT CLICKS
+// --------------------------------------------------------
+
+async function handleRecentClicks(slug, request, env, cors) {
+  const url = new URL(request.url);
+  const key = url.searchParams.get("key");
+  const limit = parseInt(url.searchParams.get("limit") || "50", 10);
+
+  const data = await env.LINKS.get(slug);
+  if (!data) return json({ error: "Link not found" }, 404, cors);
+
+  const link = JSON.parse(data);
+
+  if (!key || key !== link.owner_key) {
+    return json({ error: "Unauthorized" }, 403, cors);
+  }
+
+  // Get recent click events - KV list returns keys in lexicographic order
+  // Since our keys are click:slug:timestamp:random, newer entries come last
+  const clickList = await env.LINKS.list({ prefix: `click:${slug}:`, limit: 1000 });
+  const clicks = [];
+
+  // Fetch clicks concurrently for better performance
+  const clickKeys = clickList.keys.slice(-limit); // Get the last N entries (most recent)
+  const clickPromises = clickKeys.map(entry => env.LINKS.get(entry.name));
+  const clickResults = await Promise.all(clickPromises);
+
+  for (const clickData of clickResults) {
+    if (clickData) {
+      clicks.push(JSON.parse(clickData));
+    }
+  }
+
+  // Sort by timestamp descending (most recent first)
+  clicks.sort((a, b) => b.timestamp - a.timestamp);
+
+  return json(
+    {
+      slug,
+      clicks: clicks.slice(0, limit),
+      total: link.clicks || 0,
+    },
+    200,
+    cors
+  );
+}
+
+// --------------------------------------------------------
 // UPDATE / DELETE
 // --------------------------------------------------------
 
@@ -281,7 +346,14 @@ async function handleUpdateLink(slug, request, env, cors) {
   const incoming = await request.json();
 
   if (incoming.destination) {
-    link.destination = incoming.destination.trim();
+    const destination = incoming.destination.trim();
+    
+    // Validate URL
+    if (!isValidUrl(destination)) {
+      return json({ error: "Invalid destination URL" }, 400, cors);
+    }
+    
+    link.destination = destination;
   }
 
   if (typeof incoming.title === "string") {
@@ -304,6 +376,19 @@ async function handleDeleteLink(slug, request, env, cors) {
   const link = JSON.parse(data);
 
   if (key !== link.owner_key) return json({ error: "Unauthorized" }, 403, cors);
+
+  // Remove from owner index
+  const indexKey = `owner_index:${link.owner_key}`;
+  const indexData = await env.LINKS.get(indexKey);
+  if (indexData) {
+    const slugs = JSON.parse(indexData);
+    const filtered = slugs.filter(s => s !== slug);
+    if (filtered.length > 0) {
+      await env.LINKS.put(indexKey, JSON.stringify(filtered));
+    } else {
+      await env.LINKS.delete(indexKey);
+    }
+  }
 
   // delete per-click events
   const clickList = await env.LINKS.list({ prefix: `click:${slug}:` });
@@ -574,5 +659,32 @@ async function hashIP(ip) {
     return hex.slice(0, 32);
   } catch {
     return null;
+  }
+}
+
+// Validate URL format
+function isValidUrl(urlString) {
+  try {
+    const url = new URL(urlString);
+    // Only allow http and https protocols
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+// Index owner key for fast lookups
+async function indexOwnerKey(env, owner_key, slug) {
+  const indexKey = `owner_index:${owner_key}`;
+  const existing = await env.LINKS.get(indexKey);
+  
+  let slugs = [];
+  if (existing) {
+    slugs = JSON.parse(existing);
+  }
+  
+  if (!slugs.includes(slug)) {
+    slugs.push(slug);
+    await env.LINKS.put(indexKey, JSON.stringify(slugs));
   }
 }
