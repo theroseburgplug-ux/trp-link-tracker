@@ -1,0 +1,13 @@
+name = "trp-link-tracker"
+main = "src/index.js"
+compatibility_date = "2025-12-02"
+compatibility_flags = ["nodejs_compat"]
+
+[dev]
+local = true
+remote = false
+
+[[kv_namespaces]]
+binding = "LINKS"
+id = "bcfa47c67ef1484fbc9a308837c9d47d"
+preview_id = "bdd2060711f34fb0a370d692349836b0"
