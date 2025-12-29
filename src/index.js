@@ -34,10 +34,13 @@ if (path === "/debug/list-all") {
   const out = [];
 
   for (const entry of list.keys) {
-    if (!entry.name.startsWith("click:")) {
-      const data = await env.LINKS.get(entry.name);
-      out.push(JSON.parse(data));
-    }
+    // skip click, aggregate, and owner index entries
+    if (entry.name.startsWith("click:")) continue;
+    if (entry.name.startsWith("agg:")) continue;
+    if (entry.name.startsWith("owner:")) continue;
+
+    const data = await env.LINKS.get(entry.name);
+    out.push(JSON.parse(data));
   }
 
   return new Response(JSON.stringify(out, null, 2), {
@@ -53,6 +56,11 @@ if (path === "/debug/list-all") {
   // List links for a given key
   if (path === "/api/links" && request.method === "GET") {
     return handleListLinks(request, env, corsHeaders);
+  }
+
+  // Get recently created links (public endpoint with optional limit)
+  if (path === "/api/recent" && request.method === "GET") {
+    return handleRecentLinks(request, env, corsHeaders);
   }
 
   // Basic stats JSON (auth required)
@@ -145,6 +153,9 @@ async function handleCreateLink(request, env, cors, url) {
     };
 
     await env.LINKS.put(slug, JSON.stringify(record));
+    
+    // Add to owner index
+    await addToOwnerIndex(env, owner_key, slug);
 
     return json(
       {
@@ -176,23 +187,61 @@ async function handleListLinks(request, env, cors) {
 
   if (!key) return json({ error: "Missing ?key=" }, 400, cors);
 
+  // Use owner index for fast lookup
+  const slugs = await getOwnerLinks(env, key);
+  const links = [];
+
+  for (const slug of slugs) {
+    const obj = await env.LINKS.get(slug);
+    if (obj) {
+      links.push(JSON.parse(obj));
+    }
+  }
+
+  links.sort((a, b) => b.created - a.created);
+  return json({ links }, 200, cors);
+}
+
+// --------------------------------------------------------
+// GET RECENT LINKS (PUBLIC)
+// --------------------------------------------------------
+
+async function handleRecentLinks(request, env, cors) {
+  const url = new URL(request.url);
+  const limitParam = url.searchParams.get("limit");
+  let limit = limitParam ? parseInt(limitParam, 10) : 10;
+  
+  // Validate limit is within reasonable bounds
+  if (isNaN(limit) || limit < 1) limit = 10;
+  if (limit > 100) limit = 100;
+
   const list = await env.LINKS.list();
   const links = [];
 
   for (const entry of list.keys) {
-    // skip click & aggregate entries
+    // skip click, aggregate, and owner index entries
     if (entry.name.startsWith("click:")) continue;
     if (entry.name.startsWith("agg:")) continue;
+    if (entry.name.startsWith("owner:")) continue;
 
     const obj = await env.LINKS.get(entry.name);
     if (!obj) continue;
 
     const parsed = JSON.parse(obj);
-    if (parsed.owner_key === key) links.push(parsed);
+    // Only include basic info (no owner_key for security)
+    links.push({
+      slug: parsed.slug,
+      title: parsed.title || "",
+      created: parsed.created,
+      clicks: parsed.clicks || 0,
+    });
   }
 
+  // Sort by created date descending
   links.sort((a, b) => b.created - a.created);
-  return json({ links }, 200, cors);
+  
+  // Return limited number of links
+  return json({ links: links.slice(0, limit) }, 200, cors);
 }
 
 // --------------------------------------------------------
@@ -316,6 +365,9 @@ async function handleDeleteLink(slug, request, env, cors) {
   for (const entry of aggList.keys) {
     await env.LINKS.delete(entry.name);
   }
+
+  // Remove from owner index
+  await removeFromOwnerIndex(env, link.owner_key, slug);
 
   await env.LINKS.delete(slug);
   return json({ success: true }, 200, cors);
@@ -494,6 +546,51 @@ async function getAggregatesForLink(slug, env, days = 30) {
     byDevice: mapToArray(deviceMap, "device"),
     byBrowser: mapToArray(browserMap, "browser"),
   };
+}
+
+// --------------------------------------------------------
+// OWNER INDEX MANAGEMENT
+// --------------------------------------------------------
+
+async function addToOwnerIndex(env, owner_key, slug) {
+  const indexKey = `owner:${owner_key}`;
+  const existing = await env.LINKS.get(indexKey);
+  let slugs = [];
+  
+  if (existing) {
+    slugs = JSON.parse(existing);
+  }
+  
+  // Add slug if not already present
+  if (!slugs.includes(slug)) {
+    slugs.push(slug);
+    await env.LINKS.put(indexKey, JSON.stringify(slugs));
+  }
+}
+
+async function removeFromOwnerIndex(env, owner_key, slug) {
+  const indexKey = `owner:${owner_key}`;
+  const existing = await env.LINKS.get(indexKey);
+  
+  if (!existing) return;
+  
+  let slugs = JSON.parse(existing);
+  slugs = slugs.filter(s => s !== slug);
+  
+  if (slugs.length > 0) {
+    await env.LINKS.put(indexKey, JSON.stringify(slugs));
+  } else {
+    await env.LINKS.delete(indexKey);
+  }
+}
+
+async function getOwnerLinks(env, owner_key) {
+  const indexKey = `owner:${owner_key}`;
+  const existing = await env.LINKS.get(indexKey);
+  
+  if (!existing) return [];
+  
+  return JSON.parse(existing);
 }
 
 // --------------------------------------------------------
