@@ -199,15 +199,14 @@ async function handleListLinks(request, env, cors) {
   }
 
   const slugs = JSON.parse(indexData);
-  const links = [];
-
-  for (const slug of slugs) {
-    const obj = await env.LINKS.get(slug);
-    if (obj) {
-      const parsed = JSON.parse(obj);
-      links.push(parsed);
-    }
-  }
+  
+  // Fetch all links concurrently for better performance
+  const linkPromises = slugs.map(slug => env.LINKS.get(slug));
+  const linkResults = await Promise.all(linkPromises);
+  
+  const links = linkResults
+    .filter(obj => obj !== null)
+    .map(obj => JSON.parse(obj));
 
   links.sort((a, b) => b.created - a.created);
   return json({ links }, 200, cors);
@@ -297,17 +296,19 @@ async function handleRecentClicks(slug, request, env, cors) {
     return json({ error: "Unauthorized" }, 403, cors);
   }
 
-  // Get recent click events
-  const clickList = await env.LINKS.list({ prefix: `click:${slug}:` });
+  // Get recent click events - KV list returns keys in lexicographic order
+  // Since our keys are click:slug:timestamp:random, newer entries come last
+  const clickList = await env.LINKS.list({ prefix: `click:${slug}:`, limit: 1000 });
   const clicks = [];
 
-  for (const entry of clickList.keys) {
-    if (clicks.length >= limit) break;
-    
-    const clickData = await env.LINKS.get(entry.name);
+  // Fetch clicks concurrently for better performance
+  const clickKeys = clickList.keys.slice(-limit); // Get the last N entries (most recent)
+  const clickPromises = clickKeys.map(entry => env.LINKS.get(entry.name));
+  const clickResults = await Promise.all(clickPromises);
+
+  for (const clickData of clickResults) {
     if (clickData) {
-      const click = JSON.parse(clickData);
-      clicks.push(click);
+      clicks.push(JSON.parse(clickData));
     }
   }
 
