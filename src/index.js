@@ -34,10 +34,13 @@ if (path === "/debug/list-all") {
   const out = [];
 
   for (const entry of list.keys) {
-    if (!entry.name.startsWith("click:")) {
-      const data = await env.LINKS.get(entry.name);
-      out.push(JSON.parse(data));
-    }
+    // skip click, aggregate, and owner index entries
+    if (entry.name.startsWith("click:")) continue;
+    if (entry.name.startsWith("agg:")) continue;
+    if (entry.name.startsWith("owner:")) continue;
+
+    const data = await env.LINKS.get(entry.name);
+    out.push(JSON.parse(data));
   }
 
   return new Response(JSON.stringify(out, null, 2), {
@@ -206,7 +209,11 @@ async function handleListLinks(request, env, cors) {
 async function handleRecentLinks(request, env, cors) {
   const url = new URL(request.url);
   const limitParam = url.searchParams.get("limit");
-  const limit = limitParam ? parseInt(limitParam, 10) : 10;
+  let limit = limitParam ? parseInt(limitParam, 10) : 10;
+  
+  // Validate limit is within reasonable bounds
+  if (isNaN(limit) || limit < 1) limit = 10;
+  if (limit > 100) limit = 100;
 
   const list = await env.LINKS.list();
   const links = [];

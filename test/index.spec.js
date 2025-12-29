@@ -223,5 +223,33 @@ describe('TRP Link Tracker', () => {
 
 			expect(result.links.length).toBe(2);
 		});
+
+		it('validates limit parameter bounds', async () => {
+			// Create a link
+			await SELF.fetch('http://example.com/api/links', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					slug: 'validate-test',
+					destination: 'https://example.com/test',
+					title: 'Test'
+				})
+			});
+
+			// Test negative limit defaults to 10
+			const negResponse = await SELF.fetch('http://example.com/api/recent?limit=-5');
+			const negResult = await negResponse.json();
+			expect(negResult.links.length).toBeGreaterThanOrEqual(1);
+
+			// Test very large limit caps at 100
+			const largeResponse = await SELF.fetch('http://example.com/api/recent?limit=999');
+			const largeResult = await largeResponse.json();
+			expect(largeResult.links.length).toBeLessThanOrEqual(100);
+
+			// Test invalid limit defaults to 10
+			const invalidResponse = await SELF.fetch('http://example.com/api/recent?limit=abc');
+			const invalidResult = await invalidResponse.json();
+			expect(invalidResult.links.length).toBeGreaterThanOrEqual(1);
+		});
 	});
 });
